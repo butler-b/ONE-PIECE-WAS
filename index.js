@@ -34,7 +34,6 @@ const Conversation = mongoose.model('Conversation', conversationSchema);
 const app = express();
 const port = 8080;  // 포트 설정 수정
 
-app.use(express.static('public'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));  // URL-encoded 데이터를 처리
 
@@ -87,19 +86,35 @@ const authenticateToken = (req, res, next) => {
   }
 };
 
-// 기본 루트: index.html 파일 제공
-app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/public/index.html');
-});
-
 // 사용자 등록 라우트
-app.post('/api/users', async (req, res) => {
-  const user = new User(req.body);
+app.post('/api/register', async (req, res) => {
+  const { name, email, password } = req.body;
+
+  if (!name || !email || !password) {
+    return res.status(400).json({ message: 'All fields are required' });
+  }
+
   try {
-    await user.save();
-    res.status(201).send(user);
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ message: 'User already exists' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const newUser = new User({
+      name,
+      email,
+      password: hashedPassword,
+    });
+
+    await newUser.save();
+
+    const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+
+    res.status(201).json({ token, message: 'User registered successfully' });
   } catch (error) {
-    res.status(400).send(error);
+    res.status(500).json({ message: 'Server error' });
   }
 });
 
@@ -139,45 +154,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// 사용자 등록 라우트 (POST /api/register)
-app.post('/api/register', async (req, res) => {
-  const { name, email, password } = req.body;
-
-  // 입력값 유효성 검사
-  if (!name || !email || !password) {
-    return res.status(400).json({ message: 'All fields are required' });
-  }
-
-  try {
-    // 기존 사용자 확인
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ message: 'User already exists' });
-    }
-
-    // 비밀번호 암호화
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // 새 사용자 생성
-    const newUser = new User({
-      name,
-      email,
-      password: hashedPassword,
-    });
-
-    // 사용자 저장
-    await newUser.save();
-
-    // JWT 토큰 생성 (선택 사항)
-    const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-
-    res.status(201).json({ token, message: 'User registered successfully' });
-  } catch (error) {
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// 이전 대화 기록을 저장하고 가져오는 기능 추가 (MongoDB 사용)
+// 대화 기록과 ChatGPT와의 상호작용
 app.all('/api/chatbot', authenticateToken, async (req, res) => {
   const { message, systemRole } = req.body;
 
@@ -190,15 +167,12 @@ app.all('/api/chatbot', authenticateToken, async (req, res) => {
       await user.save();
     }
 
-    // MongoDB에서 사용자 대화 기록을 가져오기
     const conversation = await Conversation.find({ userId });
 
-    // 이전 대화 기록과 함께 ChatGPT API 요청
     const botResponse = await getChatGPTResponse([...conversation.map(c => ({
       role: c.role, content: c.content
     })), { role: 'user', content: message }], user.systemRole);
 
-    // MongoDB에 새로운 대화 기록 저장
     await new Conversation({ userId, role: 'user', content: message }).save();
     await new Conversation({ userId, role: 'assistant', content: botResponse }).save();
 

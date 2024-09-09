@@ -2,11 +2,12 @@
 FROM node:18-alpine
 
 # 작업 디렉토리 설정
-WORKDIR /usr/src/app
+WORKDIR /root/my-api
 
 # package.json과 package-lock.json 복사
 COPY package*.json ./
 
+RUN npm install pm2 -g
 # npm을 사용하여 의존성 설치
 RUN npm install
 
@@ -17,7 +18,7 @@ COPY . .
 ENV PORT=8080
 
 # 앱을 빌드하고 시작하는 명령어
-CMD ["npm", "start"]
+CMD ["pm2-runtime", "index.js"]
 
 # 앱이 리슨할 포트
 EXPOSE 8080
