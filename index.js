@@ -6,6 +6,7 @@ const bcrypt = require('bcrypt');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const OpenAI = require("openai");
+const promClient = require('prom-client'); // Prometheus 클라이언트 추가
 
 // 환경 변수 로드
 dotenv.config();
@@ -15,6 +16,8 @@ if (!process.env.MONGO_URI || !process.env.JWT_SECRET || !process.env.OPENAI_API
   console.error("필수 환경 변수가 설정되지 않았습니다.");
   process.exit(1); // 환경 변수가 없으면 서버 종료
 }
+
+const port = process.env.PORT || 8080;  // 환경 변수로 포트 설정, 없으면 기본값 8080 사용
 
 // MongoDB 연결 설정
 mongoose.connect(process.env.MONGO_URI, {
@@ -32,23 +35,41 @@ db.once('open', () => {
   console.log('Connected to MongoDB');
 });
 
-// MongoDB Conversation 스키마 정의
-const conversationSchema = new mongoose.Schema({
-  userId: String,
-  role: String,
-  content: String,
-  timestamp: { type: Date, default: Date.now }
+// Prometheus 기본 메트릭 수집
+const collectDefaultMetrics = promClient.collectDefaultMetrics;
+collectDefaultMetrics();  // 기본 메트릭 수집 시작
+
+// Prometheus 레지스트리
+const register = promClient.register;
+
+// 요청 처리 시간 측정을 위한 히스토그램 설정
+const httpRequestDurationMicroseconds = new promClient.Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'Duration of HTTP requests in seconds',
+  labelNames: ['method', 'route', 'code'],
+  buckets: [0.1, 0.5, 1, 2, 5]  // 처리 시간을 측정할 버킷 (단위: 초)
 });
 
-const Conversation = mongoose.model('Conversation', conversationSchema);
-
-const app = express();
-const port = process.env.PORT || 8080;  // 환경 변수로 포트 설정
-
 // 미들웨어 설정
+const app = express();
 app.use(cors()); // CORS 허용
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// 요청 처리 시간 측정 미들웨어
+app.use((req, res, next) => {
+  const end = httpRequestDurationMicroseconds.startTimer();
+  res.on('finish', () => {
+    end({ method: req.method, route: req.route ? req.route.path : 'unknown', code: res.statusCode });
+  });
+  next();
+});
+
+// /metrics 엔드포인트로 메트릭 제공
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', register.contentType);
+  res.end(await register.metrics());
+});
 
 // OpenAI 설정
 const openai = new OpenAI({
@@ -174,6 +195,7 @@ app.post('/api/chatbot', authenticateToken, async (req, res) => {
       await user.save();
     }
 
+    // Conversation 모델 사용
     const conversation = await Conversation.find({ userId });
 
     const botResponse = await getChatGPTResponse([...conversation.map(c => ({
