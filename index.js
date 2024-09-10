@@ -18,7 +18,7 @@ if (!process.env.MONGO_URI || !process.env.JWT_SECRET || !process.env.OPENAI_API
   process.exit(1); // 환경 변수가 없으면 서버 종료
 }
 
-const port = process.env.PORT || 8080;  // 환경 변수로 포트 설정, 없으면 기본값 8080 사용
+const port = process.env.PORT || 8080;
 
 // MongoDB 연결 설정
 mongoose.connect(process.env.MONGO_URI, {
@@ -56,7 +56,7 @@ connection.connect((err) => {
 
 // Prometheus 기본 메트릭 수집
 const collectDefaultMetrics = promClient.collectDefaultMetrics;
-collectDefaultMetrics();  // 기본 메트릭 수집 시작
+collectDefaultMetrics();
 
 // Prometheus 레지스트리
 const register = promClient.register;
@@ -66,12 +66,12 @@ const httpRequestDurationMicroseconds = new promClient.Histogram({
   name: 'http_request_duration_seconds',
   help: 'Duration of HTTP requests in seconds',
   labelNames: ['method', 'route', 'code'],
-  buckets: [0.1, 0.5, 1, 2, 5]  // 처리 시간을 측정할 버킷 (단위: 초)
+  buckets: [0.1, 0.5, 1, 2, 5]
 });
 
 // 미들웨어 설정
 const app = express();
-app.use(cors()); // CORS 허용
+app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -102,12 +102,11 @@ async function getChatGPTResponse(messages, systemRole) {
       model: "gpt-4",
       messages: [
         { role: "system", content: systemRole || "You are a helpful assistant." },
-        ...messages // 이전 대화 기록 추가
+        ...messages
       ],
       temperature: 1,
       max_tokens: 256,
     });
-
     return response.choices[0].message.content;
   } catch (error) {
     console.error("ChatGPT API와 상호작용 중 오류 발생:", error);
@@ -131,6 +130,16 @@ const authenticateToken = (req, res, next) => {
   }
 };
 
+// MongoDB Conversation 스키마 정의
+const conversationSchema = new mongoose.Schema({
+  userId: String,
+  role: String,
+  content: String,
+  timestamp: { type: Date, default: Date.now }
+});
+
+const Conversation = mongoose.model('Conversation', conversationSchema); // Conversation 모델 정의
+
 // 사용자 등록 라우트
 app.post('/api/register', async (req, res) => {
   const { name, email, password } = req.body;
@@ -140,35 +149,51 @@ app.post('/api/register', async (req, res) => {
   }
 
   try {
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
+    // 1. MongoDB에서 사용자 확인
+    const existingUserMongo = await User.findOne({ email });
+    if (existingUserMongo) {
       return res.status(400).json({ message: '이미 존재하는 사용자입니다.' });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const newUser = new User({
-      name,
-      email,
-      password: hashedPassword,
-    });
-
-    await newUser.save();
-
-    const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.status(201).json({ token, message: '사용자가 성공적으로 등록되었습니다.' });
-
-    // MariaDB에 사용자 정보 저장
-    const query = `INSERT INTO users (name, email, password) VALUES ('${name}', '${email}', '${hashedPassword}')`;
-    connection.query(query, (err, result) => {
+    // 2. MySQL에서 사용자 확인
+    const query = `SELECT * FROM users WHERE email = ?`;
+    connection.query(query, [email], async (err, results) => {
       if (err) {
         console.error('MySQL 쿼리 오류:', err);
-      } else {
-        console.log('사용자 정보가 MySQL에 저장되었습니다.');
+        return res.status(500).json({ message: 'MySQL에서 사용자 확인 중 오류가 발생했습니다.' });
       }
+
+      if (results.length > 0) {
+        return res.status(400).json({ message: '이미 존재하는 사용자입니다.' });
+      }
+
+      // 3. 비밀번호 해싱
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // 4. MongoDB에 사용자 저장
+      const newUser = new User({
+        name,
+        email,
+        password: hashedPassword,
+      });
+      await newUser.save();
+
+      // 5. MySQL에 사용자 저장
+      const insertQuery = `INSERT INTO users (name, email, password) VALUES (?, ?, ?)`;
+      connection.query(insertQuery, [name, email, hashedPassword], (err, result) => {
+        if (err) {
+          console.error('MySQL 사용자 저장 오류:', err);
+          return res.status(500).json({ message: 'MySQL에 사용자 저장 중 오류가 발생했습니다.' });
+        }
+
+        // 6. JWT 발급
+        const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+
+        res.status(201).json({ token, message: '사용자가 성공적으로 등록되었습니다.' });
+      });
     });
   } catch (error) {
-    console.error("사용자 등록 중 오류:", error);
+    console.error('사용자 등록 중 오류:', error);
     res.status(500).json({ message: '서버 오류 발생' });
   }
 });
@@ -177,7 +202,7 @@ app.post('/api/register', async (req, res) => {
 app.get('/api/users', authenticateToken, async (req, res) => {
   try {
     // MongoDB에서 사용자 목록 가져오기
-    const users = await User.find({}, { password: 0 }); // 비밀번호 제외
+    const users = await User.find({}, { password: 0 });
     res.status(200).json(users);
 
     // MariaDB에서 사용자 목록 가져오기
@@ -203,17 +228,21 @@ app.post('/api/login', async (req, res) => {
   }
 
   try {
+    // 1. MongoDB에서 사용자 찾기
     const user = await User.findOne({ email });
     if (!user) {
       return res.status(400).json({ message: '잘못된 이메일 또는 비밀번호입니다.' });
     }
 
+    // 2. 입력된 비밀번호와 해싱된 비밀번호 비교
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(400).json({ message: '잘못된 이메일 또는 비밀번호입니다.' });
     }
 
+    // 3. JWT 토큰 발급
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+
     res.json({ token, message: '로그인 성공!' });
   } catch (error) {
     console.error("로그인 중 오류:", error);
