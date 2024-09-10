@@ -1,18 +1,19 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const mysql = require('mysql');  // MySQL 모듈 추가
 const User = require('./models/User');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const OpenAI = require("openai");
-const promClient = require('prom-client'); // Prometheus 클라이언트 추가
+const promClient = require('prom-client');
 
 // 환경 변수 로드
 dotenv.config();
 
 // 필수 환경 변수 확인
-if (!process.env.MONGO_URI || !process.env.JWT_SECRET || !process.env.OPENAI_API_KEY) {
+if (!process.env.MONGO_URI || !process.env.JWT_SECRET || !process.env.OPENAI_API_KEY || !process.env.DB_HOST) {
   console.error("필수 환경 변수가 설정되지 않았습니다.");
   process.exit(1); // 환경 변수가 없으면 서버 종료
 }
@@ -33,6 +34,24 @@ const db = mongoose.connection;
 db.on('error', console.error.bind(console, 'MongoDB connection error:'));
 db.once('open', () => {
   console.log('Connected to MongoDB');
+});
+
+// MySQL (MariaDB) 연결 설정
+const connection = mysql.createConnection({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  port: process.env.DB_PORT
+});
+
+// MySQL 연결 시도
+connection.connect((err) => {
+  if (err) {
+    console.error('MySQL 연결 오류:', err);
+    return;
+  }
+  console.log('MySQL에 연결되었습니다.');
 });
 
 // Prometheus 기본 메트릭 수집
@@ -138,6 +157,16 @@ app.post('/api/register', async (req, res) => {
 
     const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
     res.status(201).json({ token, message: '사용자가 성공적으로 등록되었습니다.' });
+
+    // MariaDB에 사용자 정보 저장
+    const query = `INSERT INTO users (name, email, password) VALUES ('${name}', '${email}', '${hashedPassword}')`;
+    connection.query(query, (err, result) => {
+      if (err) {
+        console.error('MySQL 쿼리 오류:', err);
+      } else {
+        console.log('사용자 정보가 MySQL에 저장되었습니다.');
+      }
+    });
   } catch (error) {
     console.error("사용자 등록 중 오류:", error);
     res.status(500).json({ message: '서버 오류 발생' });
@@ -147,8 +176,18 @@ app.post('/api/register', async (req, res) => {
 // 사용자 목록 조회 라우트 (GET /api/users)
 app.get('/api/users', authenticateToken, async (req, res) => {
   try {
+    // MongoDB에서 사용자 목록 가져오기
     const users = await User.find({}, { password: 0 }); // 비밀번호 제외
     res.status(200).json(users);
+
+    // MariaDB에서 사용자 목록 가져오기
+    connection.query('SELECT * FROM users', (err, results) => {
+      if (err) {
+        console.error('MySQL 쿼리 오류:', err);
+        return;
+      }
+      console.log('MySQL 사용자 목록:', results);
+    });
   } catch (error) {
     console.error("사용자 목록 조회 중 오류:", error);
     res.status(500).json({ message: '사용자 조회 중 오류 발생' });
